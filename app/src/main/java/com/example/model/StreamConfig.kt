@@ -1,6 +1,8 @@
 package com.example.model
 
 enum class OmtTransportMode(val displayName: String, val description: String) {
+    OMT_TCP_SERVER("OMT Standard TCP Server", "Listens for OMT PC receivers (vMix/OBS) on port 6400+ with mDNS"),
+    OMT_TCP("OMT Unicast TCP Client", "Length-prefixed OMTMediaFrame over persistent low-latency TCP"),
     OMT_UDP("OMT Direct UDP", "Framed NAL/TS elementary stream with OMT packet header"),
     RTP_H264("RTP / H.264 (RFC 6184)", "Standard ultra-low latency RTP packetization for OBS/vMix"),
     RAW_SOCKET("Raw Video Socket", "Direct low-overhead TCP/UDP socket streaming")

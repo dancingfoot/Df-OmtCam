@@ -4,16 +4,27 @@ import android.util.Log
 import com.example.model.OmtTransportMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
+import java.io.DataOutputStream
+import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * High-performance low-latency packetizer and network transmitter for OMT streams.
- * Handles MTU chunking, sequence numbering, microsecond timestamps, and socket transmission.
+ * Enhanced high-performance low-latency packetizer and network transmitter for OMT streams.
+ * Supports:
+ * 1. OMT_TCP_SERVER: Standard OMT broadcast server listening on port (e.g. 6400) for PC receivers
+ * 2. OMT_TCP: Length-prefixed OMTMediaFrame unicast to a PC listener
+ * 3. OMT_UDP: Microsecond PTS chunked UDP packets
+ * 4. RTP_H264: RFC 6184 standard single-NAL and FU-A fragmentation
+ * 5. RAW_SOCKET: Direct elementary stream UDP
  */
 class OmtPacketTransmitter {
     companion object {
@@ -23,11 +34,22 @@ class OmtPacketTransmitter {
         private const val RTP_PAYLOAD_TYPE_H264 = 96
     }
 
-    private var socket: DatagramSocket? = null
+    // UDP Socket
+    private var udpSocket: DatagramSocket? = null
     private var destinationAddress: InetAddress? = null
     private var destinationPort: Int = 9998
-    private var transportMode: OmtTransportMode = OmtTransportMode.OMT_UDP
 
+    // TCP Client
+    private var tcpClientSocket: Socket? = null
+    private var tcpClientOut: DataOutputStream? = null
+
+    // TCP Server (Accepts incoming connections from OMT receivers, OBS, or vMix)
+    private var tcpServerSocket: ServerSocket? = null
+    private var tcpServerThread: Thread? = null
+    private val clientSockets = CopyOnWriteArrayList<Socket>()
+    private val clientStreams = CopyOnWriteArrayList<DataOutputStream>()
+
+    private var transportMode: OmtTransportMode = OmtTransportMode.OMT_UDP
     private val isRunning = AtomicBoolean(false)
     private var sequenceNumber: Short = 0
     private var rtpSequenceNumber: Short = 0
@@ -38,6 +60,7 @@ class OmtPacketTransmitter {
 
     val totalPacketsSent: Long get() = totalPackets.get()
     val totalBytesSent: Long get() = totalBytes.get()
+    val activeClientsCount: Int get() = clientStreams.size
 
     suspend fun connect(
         host: String,
@@ -45,81 +68,273 @@ class OmtPacketTransmitter {
         mode: OmtTransportMode
     ) = withContext(Dispatchers.IO) {
         disconnect()
+        transportMode = mode
+        destinationPort = port
+        isRunning.set(true)
+        sequenceNumber = 0
+        rtpSequenceNumber = 0
+        totalPackets.set(0)
+        totalBytes.set(0)
+
         try {
-            destinationAddress = InetAddress.getByName(host)
-            destinationPort = port
-            transportMode = mode
-            val sock = DatagramSocket().apply {
-                sendBufferSize = 1024 * 1024 // 1MB buffer for low latency burst handling
-                trafficClass = 0x10 // Low-delay IPTOS
+            when (mode) {
+                OmtTransportMode.OMT_TCP_SERVER -> {
+                    startTcpServer(port)
+                }
+                OmtTransportMode.OMT_TCP -> {
+                    startTcpClient(host, port)
+                }
+                OmtTransportMode.OMT_UDP,
+                OmtTransportMode.RTP_H264,
+                OmtTransportMode.RAW_SOCKET -> {
+                    startUdp(host, port)
+                }
             }
-            socket = sock
-            isRunning.set(true)
-            sequenceNumber = 0
-            rtpSequenceNumber = 0
-            totalPackets.set(0)
-            totalBytes.set(0)
-            Log.i(TAG, "Connected to $host:$port using mode $mode")
+            Log.i(TAG, "Initialized transmitter in mode $mode on port $port")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize socket to $host:$port", e)
+            Log.e(TAG, "Failed to initialize transmitter: ${e.message}", e)
+            disconnect()
             throw e
         }
     }
 
-    fun disconnect() {
-        isRunning.set(false)
-        try {
-            socket?.close()
-        } catch (_: Exception) {}
-        socket = null
+    private fun startUdp(host: String, port: Int) {
+        destinationAddress = InetAddress.getByName(host)
+        destinationPort = port
+        val sock = DatagramSocket().apply {
+            sendBufferSize = 1024 * 1024
+            trafficClass = 0x10 // Low-delay IPTOS
+        }
+        udpSocket = sock
     }
 
-    fun isConnected(): Boolean = isRunning.get() && socket != null
+    private fun startTcpClient(host: String, port: Int) {
+        val sock = Socket(host, port).apply {
+            tcpNoDelay = true
+            sendBufferSize = 1024 * 1024
+        }
+        tcpClientSocket = sock
+        tcpClientOut = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), 65536))
+    }
+
+    private fun startTcpServer(port: Int) {
+        val server = ServerSocket(port, 10).apply {
+            reuseAddress = true
+        }
+        tcpServerSocket = server
+
+        tcpServerThread = Thread({
+            Log.i(TAG, "OMT TCP Server listening on port $port for incoming connections")
+            while (isRunning.get() && !server.isClosed) {
+                try {
+                    val client = server.accept().apply {
+                        tcpNoDelay = true
+                        sendBufferSize = 1024 * 1024
+                    }
+                    Log.i(TAG, "Accepted OMT Receiver client connection from ${client.remoteSocketAddress}")
+                    val out = DataOutputStream(BufferedOutputStream(client.getOutputStream(), 65536))
+                    clientSockets.add(client)
+                    clientStreams.add(out)
+                } catch (e: Exception) {
+                    if (!isRunning.get() || server.isClosed) break
+                    Log.w(TAG, "Error accepting client: ${e.message}")
+                }
+            }
+        }, "OmtTcpServerThread").apply { start() }
+    }
+
+    fun disconnect() {
+        isRunning.set(false)
+        // Close UDP
+        try {
+            udpSocket?.close()
+        } catch (_: Exception) {}
+        udpSocket = null
+
+        // Close TCP Client
+        try {
+            tcpClientOut?.close()
+            tcpClientSocket?.close()
+        } catch (_: Exception) {}
+        tcpClientOut = null
+        tcpClientSocket = null
+
+        // Close TCP Server
+        try {
+            tcpServerSocket?.close()
+        } catch (_: Exception) {}
+        tcpServerSocket = null
+
+        tcpServerThread?.interrupt()
+        tcpServerThread = null
+
+        // Close all active clients
+        for (client in clientSockets) {
+            try { client.close() } catch (_: Exception) {}
+        }
+        clientSockets.clear()
+        clientStreams.clear()
+    }
+
+    fun isConnected(): Boolean {
+        if (!isRunning.get()) return false
+        return when (transportMode) {
+            OmtTransportMode.OMT_TCP_SERVER -> tcpServerSocket != null && !tcpServerSocket!!.isClosed
+            OmtTransportMode.OMT_TCP -> tcpClientSocket?.isConnected == true && !tcpClientSocket!!.isClosed
+            else -> udpSocket != null && !udpSocket!!.isClosed
+        }
+    }
 
     /**
-     * Packetizes an H.264 video NAL unit or frame payload and transmits via UDP/OMT.
+     * Packetizes an H.264 video frame and transmits via configured OMT transport.
      */
     fun sendVideoFrame(frameData: ByteArray, presentationTimeUs: Long, isKeyFrame: Boolean) {
         if (!isRunning.get()) return
-        val currentSocket = socket ?: return
-        val address = destinationAddress ?: return
 
         try {
             when (transportMode) {
+                OmtTransportMode.OMT_TCP_SERVER -> {
+                    broadcastOmtMediaFrame(frameData, presentationTimeUs, isKeyFrame, 0x01)
+                }
+                OmtTransportMode.OMT_TCP -> {
+                    sendOmtMediaFrameTcp(tcpClientOut, frameData, presentationTimeUs, isKeyFrame, 0x01)
+                }
                 OmtTransportMode.OMT_UDP -> {
-                    sendOmtChunked(currentSocket, address, destinationPort, frameData, presentationTimeUs, isKeyFrame, 0x01)
+                    val sock = udpSocket ?: return
+                    val addr = destinationAddress ?: return
+                    sendOmtChunked(sock, addr, destinationPort, frameData, presentationTimeUs, isKeyFrame, 0x01)
                 }
                 OmtTransportMode.RTP_H264 -> {
-                    sendRtpH264(currentSocket, address, destinationPort, frameData, presentationTimeUs)
+                    val sock = udpSocket ?: return
+                    val addr = destinationAddress ?: return
+                    sendRtpH264(sock, addr, destinationPort, frameData, presentationTimeUs)
                 }
                 OmtTransportMode.RAW_SOCKET -> {
-                    sendRawUdp(currentSocket, address, destinationPort, frameData)
+                    val sock = udpSocket ?: return
+                    val addr = destinationAddress ?: return
+                    sendRawUdp(sock, addr, destinationPort, frameData)
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending frame packet: ${e.message}")
+            Log.e(TAG, "Error sending video frame: ${e.message}")
         }
     }
 
     /**
-     * Packetizes AAC/Opus audio payload.
+     * Transmits AAC/Opus audio payload.
      */
     fun sendAudioData(audioData: ByteArray, presentationTimeUs: Long) {
         if (!isRunning.get()) return
-        val currentSocket = socket ?: return
-        val address = destinationAddress ?: return
 
         try {
-            if (transportMode == OmtTransportMode.OMT_UDP) {
-                sendOmtChunked(currentSocket, address, destinationPort, audioData, presentationTimeUs, false, 0x02)
+            when (transportMode) {
+                OmtTransportMode.OMT_TCP_SERVER -> {
+                    broadcastOmtMediaFrame(audioData, presentationTimeUs, false, 0x02)
+                }
+                OmtTransportMode.OMT_TCP -> {
+                    sendOmtMediaFrameTcp(tcpClientOut, audioData, presentationTimeUs, false, 0x02)
+                }
+                OmtTransportMode.OMT_UDP -> {
+                    val sock = udpSocket ?: return
+                    val addr = destinationAddress ?: return
+                    sendOmtChunked(sock, addr, destinationPort, audioData, presentationTimeUs, false, 0x02)
+                }
+                else -> {}
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending audio packet: ${e.message}")
+            Log.e(TAG, "Error sending audio data: ${e.message}")
         }
     }
 
     /**
-     * OMT Protocol Framing:
+     * OMTMediaFrame standard TCP framing:
+     * [0..3] Total Frame Length (Int32 BigEndian)
+     * [4..5] Magic (0x4F4D "OM")
+     * [6] Version (1)
+     * [7] Media Type (0x01 = Video, 0x02 = Audio)
+     * [8..9] Flags (Bit 0: KeyFrame)
+     * [10..17] Presentation Timestamp in microseconds (Int64)
+     * [18..] Payload data
+     */
+    private fun sendOmtMediaFrameTcp(
+        out: DataOutputStream?,
+        payload: ByteArray,
+        ptsUs: Long,
+        isKeyFrame: Boolean,
+        mediaType: Byte
+    ) {
+        if (out == null) return
+        val flags: Short = if (isKeyFrame) 0x01 else 0x00
+        val headerLen = 18
+        val totalLen = headerLen + payload.size
+
+        synchronized(out) {
+            out.writeInt(totalLen)
+            out.writeShort(OMT_MAGIC.toInt())
+            out.writeByte(1) // version 1
+            out.writeByte(mediaType.toInt())
+            out.writeShort(flags.toInt())
+            out.writeLong(ptsUs)
+            out.write(payload)
+            out.flush()
+        }
+
+        totalPackets.incrementAndGet()
+        totalBytes.addAndGet((4 + totalLen).toLong())
+    }
+
+    private fun broadcastOmtMediaFrame(
+        payload: ByteArray,
+        ptsUs: Long,
+        isKeyFrame: Boolean,
+        mediaType: Byte
+    ) {
+        if (clientStreams.isEmpty()) return
+
+        val flags: Short = if (isKeyFrame) 0x01 else 0x00
+        val headerLen = 18
+        val totalLen = headerLen + payload.size
+
+        val deadClients = mutableListOf<DataOutputStream>()
+
+        for (i in 0 until clientStreams.size) {
+            val out = clientStreams.getOrNull(i) ?: continue
+            try {
+                synchronized(out) {
+                    out.writeInt(totalLen)
+                    out.writeShort(OMT_MAGIC.toInt())
+                    out.writeByte(1)
+                    out.writeByte(mediaType.toInt())
+                    out.writeShort(flags.toInt())
+                    out.writeLong(ptsUs)
+                    out.write(payload)
+                    out.flush()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Client socket disconnected or write failed: ${e.message}")
+                deadClients.add(out)
+            }
+        }
+
+        if (deadClients.isNotEmpty()) {
+            for (dead in deadClients) {
+                val idx = clientStreams.indexOf(dead)
+                if (idx != -1) {
+                    clientStreams.removeAt(idx)
+                    try {
+                        val sock = clientSockets.removeAt(idx)
+                        sock.close()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
+        totalPackets.incrementAndGet()
+        totalBytes.addAndGet((4 + totalLen).toLong())
+    }
+
+    /**
+     * OMT Protocol UDP Framing:
      * [0..1] Magic (0x4F4D "OM")
      * [2] Version (1)
      * [3] Media Type (0x01 = Video, 0x02 = Audio)
@@ -139,113 +354,112 @@ class OmtPacketTransmitter {
         isKeyFrame: Boolean,
         mediaType: Byte
     ) {
-        val totalLen = data.size
-        val numChunks = ((totalLen + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE).coerceAtLeast(1)
-        val headerSize = 20
+        val totalSize = data.size
+        val totalChunks = ((totalSize + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE).coerceAtLeast(1)
 
-        for (i in 0 until numChunks) {
-            val offset = i * MAX_PAYLOAD_SIZE
-            val chunkSize = (totalLen - offset).coerceAtMost(MAX_PAYLOAD_SIZE)
-            val packetBuf = ByteBuffer.allocate(headerSize + chunkSize)
+        for (chunkIdx in 0 until totalChunks) {
+            val offset = chunkIdx * MAX_PAYLOAD_SIZE
+            val length = (totalSize - offset).coerceAtMost(MAX_PAYLOAD_SIZE)
 
-            val flags: Short = (
-                (if (isKeyFrame) 0x01 else 0x00) or
-                (if (i == 0) 0x02 else 0x00) or
-                (if (i == numChunks - 1) 0x04 else 0x00)
-            ).toShort()
+            val isStart = chunkIdx == 0
+            val isEnd = chunkIdx == totalChunks - 1
 
-            packetBuf.putShort(OMT_MAGIC)
-            packetBuf.put(1.toByte()) // version
-            packetBuf.put(mediaType) // 1=video, 2=audio
-            packetBuf.putShort(sequenceNumber++)
-            packetBuf.putShort(flags)
-            packetBuf.putLong(ptsUs)
-            packetBuf.putShort(i.toShort())
-            packetBuf.putShort(numChunks.toShort())
-            packetBuf.put(data, offset, chunkSize)
+            var flags: Short = 0
+            if (isKeyFrame) flags = (flags.toInt() or 0x01).toShort()
+            if (isStart) flags = (flags.toInt() or 0x02).toShort()
+            if (isEnd) flags = (flags.toInt() or 0x04).toShort()
 
-            val bytesToSend = packetBuf.array()
-            val packet = DatagramPacket(bytesToSend, bytesToSend.size, address, port)
-            sock.send(packet)
+            val packetBuffer = ByteBuffer.allocate(20 + length)
+            packetBuffer.putShort(OMT_MAGIC)
+            packetBuffer.put(1.toByte())
+            packetBuffer.put(mediaType)
+            packetBuffer.putShort(sequenceNumber)
+            packetBuffer.putShort(flags)
+            packetBuffer.putLong(ptsUs)
+            packetBuffer.putShort(chunkIdx.toShort())
+            packetBuffer.putShort(totalChunks.toShort())
+            packetBuffer.put(data, offset, length)
+
+            val packetBytes = packetBuffer.array()
+            val datagram = DatagramPacket(packetBytes, packetBytes.size, address, port)
+            sock.send(datagram)
 
             totalPackets.incrementAndGet()
-            totalBytes.addAndGet(bytesToSend.size.toLong())
+            totalBytes.addAndGet(packetBytes.size.toLong())
+            sequenceNumber = ((sequenceNumber.toInt() + 1) and 0xFFFF).toShort()
         }
     }
 
     /**
-     * Standard RFC 6184 RTP fragmentation (FU-A or Single NAL) for H.264
+     * RFC 6184 RTP Packetization for H.264
      */
     private fun sendRtpH264(
         sock: DatagramSocket,
         address: InetAddress,
         port: Int,
-        data: ByteArray,
+        nalUnit: ByteArray,
         ptsUs: Long
     ) {
-        // Strip 3-byte or 4-byte start codes (0x000001 or 0x00000001) if present
-        var startOffset = 0
-        if (data.size >= 4 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
-            startOffset = 4
-        } else if (data.size >= 3 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 1.toByte()) {
-            startOffset = 3
-        }
-        val nalSize = data.size - startOffset
-        if (nalSize <= 0) return
+        if (nalUnit.isEmpty()) return
+        val rtpTimestamp = (ptsUs * 90 / 1000).toInt()
 
-        val nalHeader = data[startOffset]
-        val nalType = (nalHeader.toInt() and 0x1F)
-        val rtpTimestamp = (ptsUs * 90 / 1000).toInt() // 90 kHz clock for video
+        if (nalUnit.size <= MAX_PAYLOAD_SIZE) {
+            val rtpBuffer = ByteBuffer.allocate(12 + nalUnit.size)
+            writeRtpHeader(rtpBuffer, marker = true, timestamp = rtpTimestamp)
+            rtpBuffer.put(nalUnit)
 
-        if (nalSize <= MAX_PAYLOAD_SIZE) {
-            // Single NAL unit packet
-            val rtpHeader = ByteBuffer.allocate(12 + nalSize)
-            putRtpHeader(rtpHeader, marker = true, rtpTimestamp)
-            rtpHeader.put(data, startOffset, nalSize)
-            val packetBytes = rtpHeader.array()
-            sock.send(DatagramPacket(packetBytes, packetBytes.size, address, port))
+            val bytes = rtpBuffer.array()
+            sock.send(DatagramPacket(bytes, bytes.size, address, port))
             totalPackets.incrementAndGet()
-            totalBytes.addAndGet(packetBytes.size.toLong())
+            totalBytes.addAndGet(bytes.size.toLong())
         } else {
-            // FU-A Fragmentation
-            val nalDataOffset = startOffset + 1
-            val payloadSize = nalSize - 1
-            val numChunks = ((payloadSize + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE).coerceAtLeast(1)
+            val nalHeader = nalUnit[0]
+            val nalF = (nalHeader.toInt() and 0x80) != 0
+            val nalNri = (nalHeader.toInt() and 0x60) shr 5
+            val nalType = nalHeader.toInt() and 0x1F
 
-            val fuIndicator = (nalHeader.toInt() and 0xE0 or 28).toByte()
+            val fuIndicator = ((if (nalF) 0x80 else 0x00) or (nalNri shl 5) or 28).toByte()
 
-            for (i in 0 until numChunks) {
-                val offset = nalDataOffset + (i * MAX_PAYLOAD_SIZE)
-                val chunkSize = (nalSize - (offset - startOffset)).coerceAtMost(MAX_PAYLOAD_SIZE)
-                val isStart = (i == 0)
-                val isEnd = (i == numChunks - 1)
+            var offset = 1
+            var remaining = nalUnit.size - 1
 
-                var fuHeader = (nalType and 0x1F)
-                if (isStart) fuHeader = fuHeader or 0x80
-                if (isEnd) fuHeader = fuHeader or 0x40
+            while (remaining > 0) {
+                val isStart = offset == 1
+                val isEnd = remaining <= MAX_PAYLOAD_SIZE - 2
+                val chunkSize = remaining.coerceAtMost(MAX_PAYLOAD_SIZE - 2)
 
-                val rtpPacket = ByteBuffer.allocate(12 + 2 + chunkSize)
-                putRtpHeader(rtpPacket, marker = isEnd, rtpTimestamp)
-                rtpPacket.put(fuIndicator)
-                rtpPacket.put(fuHeader.toByte())
-                rtpPacket.put(data, offset, chunkSize)
+                val startBit = if (isStart) 0x80 else 0x00
+                val endBit = if (isEnd) 0x40 else 0x00
+                val fuHeader = (startBit or endBit or nalType).toByte()
 
-                val packetBytes = rtpPacket.array()
-                sock.send(DatagramPacket(packetBytes, packetBytes.size, address, port))
+                val rtpBuffer = ByteBuffer.allocate(12 + 2 + chunkSize)
+                writeRtpHeader(rtpBuffer, marker = isEnd, timestamp = rtpTimestamp)
+                rtpBuffer.put(fuIndicator)
+                rtpBuffer.put(fuHeader)
+                rtpBuffer.put(nalUnit, offset, chunkSize)
+
+                val bytes = rtpBuffer.array()
+                sock.send(DatagramPacket(bytes, bytes.size, address, port))
                 totalPackets.incrementAndGet()
-                totalBytes.addAndGet(packetBytes.size.toLong())
+                totalBytes.addAndGet(bytes.size.toLong())
+
+                offset += chunkSize
+                remaining -= chunkSize
             }
         }
     }
 
-    private fun putRtpHeader(buf: ByteBuffer, marker: Boolean, timestamp: Int) {
-        val vPXM = 0x80 // V=2, P=0, X=0, CC=0
-        val mPt = (if (marker) 0x80 else 0x00) or (RTP_PAYLOAD_TYPE_H264 and 0x7F)
-        buf.put(vPXM.toByte())
-        buf.put(mPt.toByte())
-        buf.putShort(rtpSequenceNumber++)
-        buf.putInt(timestamp)
-        buf.putInt(ssrc)
+    private fun writeRtpHeader(buffer: ByteBuffer, marker: Boolean, timestamp: Int) {
+        val vPxCc: Byte = 0x80.toByte() // V=2, P=0, X=0, CC=0
+        val mPt: Byte = ((if (marker) 0x80 else 0x00) or (RTP_PAYLOAD_TYPE_H264 and 0x7F)).toByte()
+
+        buffer.put(vPxCc)
+        buffer.put(mPt)
+        buffer.putShort(rtpSequenceNumber)
+        buffer.putInt(timestamp)
+        buffer.putInt(ssrc)
+
+        rtpSequenceNumber = ((rtpSequenceNumber.toInt() + 1) and 0xFFFF).toShort()
     }
 
     private fun sendRawUdp(
@@ -254,14 +468,15 @@ class OmtPacketTransmitter {
         port: Int,
         data: ByteArray
     ) {
-        val chunks = ((data.size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE).coerceAtLeast(1)
-        for (i in 0 until chunks) {
-            val offset = i * MAX_PAYLOAD_SIZE
-            val len = (data.size - offset).coerceAtMost(MAX_PAYLOAD_SIZE)
-            val packet = DatagramPacket(data, offset, len, address, port)
-            sock.send(packet)
+        val totalSize = data.size
+        var offset = 0
+        while (offset < totalSize) {
+            val length = (totalSize - offset).coerceAtMost(MAX_PAYLOAD_SIZE)
+            val datagram = DatagramPacket(data, offset, length, address, port)
+            sock.send(datagram)
             totalPackets.incrementAndGet()
-            totalBytes.addAndGet(len.toLong())
+            totalBytes.addAndGet(length.toLong())
+            offset += length
         }
     }
 }

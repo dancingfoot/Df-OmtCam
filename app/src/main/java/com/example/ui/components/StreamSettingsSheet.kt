@@ -271,7 +271,7 @@ fun StreamSettingsSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "OmtCam v1.0.0 (Build 1) • OMT/RTP Low-Latency",
+                    text = "DF-OmtCamera v1.1.0 (Build 2) • OMT TCP/UDP & mDNS",
                     color = TextMuted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace

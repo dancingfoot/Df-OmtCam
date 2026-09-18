@@ -1,6 +1,6 @@
 {
-  "name": "OmtCam",
-  "description": "Open Media Transport (OMT) ultra low-latency live camera streaming application.",
+  "name": "DF-OmtCamera",
+  "description": "Open Media Transport (OMT) ultra low-latency live camera streaming and viewer application.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

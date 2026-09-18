@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "OmtCam"
+rootProject.name = "DF-OmtCamera"
 
 include(":app")

@@ -259,6 +259,24 @@ fun StreamSettingsSheet(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // APP VERSION INFO
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "OmtCam v1.0.0 (Build 1) • OMT/RTP Low-Latency",
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
     }
 }

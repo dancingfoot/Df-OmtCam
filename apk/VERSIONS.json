@@ -1,0 +1,29 @@
+{
+  "project": "OmtCam",
+  "latestVersion": "1.0.0",
+  "latestBuildCode": 1,
+  "releases": [
+    {
+      "version": "1.0.0",
+      "buildCode": 1,
+      "releaseDate": "2026-09-18",
+      "apkFilename": "OmtCam-v1.0.0-debug.apk",
+      "minSdk": 24,
+      "targetSdk": 36,
+      "features": [
+        "Instant camera launch on startup with CameraX lifecycle",
+        "Hardware-accelerated low latency H.264 (AVC Baseline) encoder via MediaCodec",
+        "OMT (Open Media Transport) UDP packetizer with sequence numbers & microsecond PTS",
+        "RFC 6184 RTP packetizer with single NAL and FU-A fragmentation",
+        "Real-time HUD with live FPS, bitrate, packet count, and estimated latency",
+        "Front/Back camera flipping, flashlight torch toggle, and audio microphone capture",
+        "Settings sheet for destination IP, port, stream ID, and encoding presets"
+      ],
+      "compatibility": {
+        "desktopOmt": "Compatible with standard OMT receivers, OBS Studio, vMix, and FFmpeg/GStreamer",
+        "companionApp": "apk/computer_app/omt_receiver.py & omt_receiver.js",
+        "viewerApp": "apk/android_viewer/ (OmtViewer)"
+      }
+    }
+  ]
+}

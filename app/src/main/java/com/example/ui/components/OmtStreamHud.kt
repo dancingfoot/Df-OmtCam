@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
@@ -74,6 +75,7 @@ fun OmtStreamHud(
     onSwitchCamera: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestKeyFrame: () -> Unit,
+    onSwitchToViewer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "live_pulse")
@@ -288,6 +290,23 @@ fun OmtStreamHud(
                 Icon(
                     imageVector = Icons.Default.Settings,
                     contentDescription = "Stream Configuration"
+                )
+            }
+
+            // Switch to Viewer Mode
+            FilledTonalIconButton(
+                onClick = onSwitchToViewer,
+                modifier = Modifier
+                    .size(46.dp)
+                    .testTag("switch_viewer_mode_button"),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = CyanAccent.copy(alpha = 0.15f),
+                    contentColor = CyanAccent
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Tv,
+                    contentDescription = "Switch to OMT Viewer Mode"
                 )
             }
         }

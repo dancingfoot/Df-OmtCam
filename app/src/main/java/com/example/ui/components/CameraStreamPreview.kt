@@ -33,6 +33,8 @@ fun CameraStreamPreview(
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     var activeCamera by remember { mutableStateOf<Camera?>(null) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var currentPreviewView by remember { mutableStateOf<PreviewView?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -44,6 +46,49 @@ fun CameraStreamPreview(
         activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
     }
 
+    // Re-bind when camera flips or resolution preset changes
+    LaunchedEffect(config.isFrontCamera, config.preset, cameraProvider, currentPreviewView) {
+        val provider = cameraProvider ?: return@LaunchedEffect
+        val pv = currentPreviewView ?: return@LaunchedEffect
+
+        val cameraSelector = if (config.isFrontCamera) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(pv.surfaceProvider)
+        }
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(config.preset.width, config.preset.height))
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+
+        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+            val image = imageProxy.image
+            if (image != null) {
+                viewModel.onCameraFrame(image, imageProxy.imageInfo.timestamp)
+            }
+            imageProxy.close()
+        }
+
+        try {
+            provider.unbindAll()
+            activeCamera = provider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageAnalysis
+            )
+            activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
+        } catch (e: Exception) {
+            android.util.Log.e("CameraStreamPreview", "Failed to bind camera: ${e.message}", e)
+        }
+    }
+
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { ctx ->
@@ -51,90 +96,14 @@ fun CameraStreamPreview(
                 scaleType = PreviewView.ScaleType.FILL_CENTER
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             }
+            currentPreviewView = previewView
 
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(config.preset.width, config.preset.height))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-
-                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val image = imageProxy.image
-                    if (image != null) {
-                        viewModel.onCameraFrame(image, imageProxy.imageInfo.timestamp)
-                    }
-                    imageProxy.close()
-                }
-
-                val cameraSelector = if (config.isFrontCamera) {
-                    CameraSelector.DEFAULT_FRONT_CAMERA
-                } else {
-                    CameraSelector.DEFAULT_BACK_CAMERA
-                }
-
-                try {
-                    cameraProvider.unbindAll()
-                    activeCamera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                    activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
-                } catch (e: Exception) {
-                    android.util.Log.e("CameraStreamPreview", "Failed to bind camera", e)
-                }
+                cameraProvider = cameraProviderFuture.get()
             }, ContextCompat.getMainExecutor(ctx))
 
             previewView
-        },
-        update = { previewView ->
-            // Update bindings when camera flips
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-                val cameraSelector = if (config.isFrontCamera) {
-                    CameraSelector.DEFAULT_FRONT_CAMERA
-                } else {
-                    CameraSelector.DEFAULT_BACK_CAMERA
-                }
-
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(config.preset.width, config.preset.height))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-
-                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val image = imageProxy.image
-                    if (image != null) {
-                        viewModel.onCameraFrame(image, imageProxy.imageInfo.timestamp)
-                    }
-                    imageProxy.close()
-                }
-
-                try {
-                    cameraProvider.unbindAll()
-                    activeCamera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                } catch (e: Exception) {
-                    android.util.Log.e("CameraStreamPreview", "Failed to rebind camera", e)
-                }
-            }, ContextCompat.getMainExecutor(context))
         }
     )
 }

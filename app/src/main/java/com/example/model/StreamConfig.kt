@@ -8,24 +8,29 @@ enum class OmtTransportMode(val displayName: String, val description: String) {
     RAW_SOCKET("Raw Video Socket", "Direct low-overhead TCP/UDP socket streaming")
 }
 
+/**
+ * Clean resolution & quality presets matching opencamera-omt (720p, 1080p, 4K).
+ */
 enum class StreamPreset(
     val label: String,
+    val shortName: String,
     val width: Int,
     val height: Int,
     val fps: Int,
     val bitrateKbps: Int
 ) {
-    ULTRA_LOW_LATENCY("Ultra Low Latency (720p @ 30fps - 2.5 Mbps)", 1280, 720, 30, 2500),
-    HIGH_FRAME_RATE("High Speed (720p @ 60fps - 3.5 Mbps)", 1280, 720, 60, 3500),
-    FULL_HD("Broadcast 1080p (1080p @ 30fps - 5.0 Mbps)", 1920, 1080, 30, 5000)
+    RES_720P("720p HD (1280x720 @ 30fps)", "720p", 1280, 720, 30, 2500),
+    RES_720P_60("720p 60fps (1280x720 @ 60fps)", "720p60", 1280, 720, 60, 3500),
+    RES_1080P("1080p Full HD (1920x1080 @ 30fps)", "1080p", 1920, 1080, 30, 5000),
+    RES_4K("4K Ultra HD (3840x2160 @ 30fps)", "4K", 3840, 2160, 30, 15000)
 }
 
 data class StreamConfig(
     val targetHost: String = "192.168.1.100",
-    val targetPort: Int = 9998,
-    val streamId: String = "omt-cam-01",
-    val transportMode: OmtTransportMode = OmtTransportMode.OMT_UDP,
-    val preset: StreamPreset = StreamPreset.ULTRA_LOW_LATENCY,
+    val targetPort: Int = 6400,
+    val streamId: String = "DF-OmtCamera",
+    val transportMode: OmtTransportMode = OmtTransportMode.OMT_TCP_SERVER,
+    val preset: StreamPreset = StreamPreset.RES_720P,
     val audioEnabled: Boolean = true,
     val torchEnabled: Boolean = false,
     val isFrontCamera: Boolean = false
@@ -39,5 +44,6 @@ data class StreamMetrics(
     val totalPacketsSent: Long = 0,
     val estimatedLatencyMs: Long = 0,
     val connectedEndpoint: String = "",
+    val activeClients: Int = 0,
     val lastError: String? = null
 )

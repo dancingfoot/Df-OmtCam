@@ -109,6 +109,7 @@ fun OmtCamApp(
                     onSwitchCamera = { viewModel.switchCamera() },
                     onOpenSettings = { viewModel.setSettingsVisible(true) },
                     onRequestKeyFrame = { viewModel.requestKeyFrame() },
+                    onPresetChanged = { viewModel.updatePreset(it) },
                     onSwitchToViewer = { viewModel.switchAppMode(AppMode.STREAM_VIEWER) },
                     modifier = Modifier
                         .fillMaxSize()

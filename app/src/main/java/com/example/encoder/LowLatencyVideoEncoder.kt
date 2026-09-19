@@ -11,10 +11,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Ultra low latency H.264 (AVC) Hardware Video Encoder using Android MediaCodec.
- * Optimized for real-time live streaming:
+ * Optimized for real-time live streaming like opencamera-omt:
  * - Baseline Profile (no B-frames)
- * - Low latency mode enabled (KEY_LATENCY = 0)
- * - Frequent keyframe intervals (1s)
+ * - Zero-latency mode enabled (KEY_LATENCY = 0, Realtime priority)
+ * - 1-second keyframe interval for fast client joins
+ * - Fast zero-allocation buffer pooling for YUV data
  * - CBR (Constant Bitrate) with dynamic bitrate adjustment
  */
 class LowLatencyVideoEncoder(
@@ -36,6 +37,9 @@ class LowLatencyVideoEncoder(
     // Cache SPS/PPS parameter sets to prepend to IDR keyframes for instant receiver decoding
     private var spsPpsHeader: ByteArray? = null
 
+    // Reusable byte array buffer to avoid GC pressure during 30/60fps camera analysis
+    private var yuvBuffer: ByteArray? = null
+
     fun start() {
         if (isRunning.get()) return
         try {
@@ -46,7 +50,7 @@ class LowLatencyVideoEncoder(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between keyframes for fast join
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
 
                 // Low latency hints on Android
                 try {
@@ -60,6 +64,7 @@ class LowLatencyVideoEncoder(
                 start()
             }
 
+            yuvBuffer = ByteArray((width * height * 3) / 2)
             isRunning.set(true)
             startDrainLoop()
             Log.i(TAG, "Hardware H.264 encoder initialized: ${width}x${height} @ $fps fps, $bitrateKbps kbps")
@@ -82,9 +87,10 @@ class LowLatencyVideoEncoder(
                 val inputBuffer = codec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val yuvData = yuv420ToNv21OrYuv(image)
-                    val len = yuvData.size.coerceAtMost(inputBuffer.remaining())
-                    inputBuffer.put(yuvData, 0, len)
+                    val targetArray = yuvBuffer ?: ByteArray((width * height * 3) / 2).also { yuvBuffer = it }
+                    val filledSize = fastYuv420ToNv21(image, targetArray)
+                    val len = filledSize.coerceAtMost(inputBuffer.remaining())
+                    inputBuffer.put(targetArray, 0, len)
                     val ptsUs = timestampNs / 1000
                     codec.queueInputBuffer(inputIndex, 0, len, ptsUs, 0)
                 }
@@ -118,7 +124,6 @@ class LowLatencyVideoEncoder(
                 }
 
                 if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    // Extract SPS/PPS header
                     val newFormat = codec.outputFormat
                     val csd0 = newFormat.getByteBuffer("csd-0") // SPS
                     val csd1 = newFormat.getByteBuffer("csd-1") // PPS
@@ -163,9 +168,12 @@ class LowLatencyVideoEncoder(
         }, "OmtVideoEncoderDrain").apply { start() }
     }
 
-    private fun yuv420ToNv21OrYuv(image: Image): ByteArray {
-        val width = image.width
-        val height = image.height
+    /**
+     * High-speed YUV420 to NV21/NV12 direct buffer copy into preallocated array.
+     */
+    private fun fastYuv420ToNv21(image: Image, out: ByteArray): Int {
+        val imgWidth = image.width
+        val imgHeight = image.height
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
@@ -174,39 +182,36 @@ class LowLatencyVideoEncoder(
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
-        val numBytes = (width * height * 3) / 2
-        val out = ByteArray(numBytes)
-
-        // Copy Y
         var outOffset = 0
         val yRowStride = yPlane.rowStride
         val yPixelStride = yPlane.pixelStride
-        if (yPixelStride == 1 && yRowStride == width) {
-            val ySize = width * height
+
+        if (yPixelStride == 1 && yRowStride == imgWidth) {
+            val ySize = imgWidth * imgHeight
             yBuffer.position(0)
             yBuffer.get(out, 0, ySize)
             outOffset += ySize
         } else {
-            for (row in 0 until height) {
+            for (row in 0 until imgHeight) {
                 yBuffer.position(row * yRowStride)
                 if (yPixelStride == 1) {
-                    yBuffer.get(out, outOffset, width)
-                    outOffset += width
+                    yBuffer.get(out, outOffset, imgWidth)
+                    outOffset += imgWidth
                 } else {
-                    for (col in 0 until width) {
+                    for (col in 0 until imgWidth) {
                         out[outOffset++] = yBuffer.get(row * yRowStride + col * yPixelStride)
                     }
                 }
             }
         }
 
-        // Copy UV (interleaved NV21/NV12 style for flexible color format)
+        // Copy UV
         val uRowStride = uPlane.rowStride
         val vRowStride = vPlane.rowStride
         val uPixelStride = uPlane.pixelStride
         val vPixelStride = vPlane.pixelStride
-        val uvHeight = height / 2
-        val uvWidth = width / 2
+        val uvHeight = imgHeight / 2
+        val uvWidth = imgWidth / 2
 
         for (row in 0 until uvHeight) {
             val uPos = row * uRowStride
@@ -217,7 +222,7 @@ class LowLatencyVideoEncoder(
             }
         }
 
-        return out
+        return outOffset
     }
 
     fun stop() {
@@ -230,6 +235,7 @@ class LowLatencyVideoEncoder(
 
         drainThread?.interrupt()
         drainThread = null
+        yuvBuffer = null
         Log.i(TAG, "Video encoder stopped")
     }
 }

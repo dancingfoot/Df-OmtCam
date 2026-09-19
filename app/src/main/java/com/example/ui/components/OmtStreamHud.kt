@@ -8,6 +8,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,14 +30,12 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -52,8 +51,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.OmtTransportMode
 import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
+import com.example.model.StreamPreset
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.DeepSpace
@@ -75,6 +76,7 @@ fun OmtStreamHud(
     onSwitchCamera: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestKeyFrame: () -> Unit,
+    onPresetChanged: (StreamPreset) -> Unit,
     onSwitchToViewer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -95,51 +97,80 @@ fun OmtStreamHud(
             .padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // TOP HUD BAR: Title, Live Status Pill & Quick Info
-        Row(
+        // TOP HUD BAR: Title, Live Status, 1-Tap Resolution Bar & Endpoint
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
                 .background(SlateCard)
                 .border(1.dp, SlateBorder, RoundedCornerShape(16.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Live Status Indicator
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(if (metrics.isStreaming) LiveRed else TextMuted)
-                        .then(if (metrics.isStreaming) Modifier.alpha(liveAlpha) else Modifier)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(if (metrics.isStreaming) LiveRed else TextMuted)
+                            .then(if (metrics.isStreaming) Modifier.alpha(liveAlpha) else Modifier)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (metrics.isStreaming) "OMT LIVE" else "READY",
+                        color = if (metrics.isStreaming) LiveRed else TextSecondary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                // Target or Server Listening indicator
                 Text(
-                    text = if (metrics.isStreaming) "OMT LIVE" else "READY",
-                    color = if (metrics.isStreaming) LiveRed else TextSecondary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "${config.preset.fps}fps / ${config.preset.width}x${config.preset.height}",
-                    color = TextMuted,
-                    fontSize = 11.sp,
+                    text = if (config.transportMode == OmtTransportMode.OMT_TCP_SERVER) {
+                        "OMT Server :${config.targetPort}"
+                    } else {
+                        "${config.targetHost}:${config.targetPort}"
+                    },
+                    color = CyanAccent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
                     fontFamily = FontFamily.Monospace
                 )
             }
 
-            // Target endpoint indicator
-            Text(
-                text = "${config.targetHost}:${config.targetPort}",
-                color = CyanAccent,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                fontFamily = FontFamily.Monospace
-            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ULTRA-FAST 1-TAP RESOLUTION SELECTOR (opencam-omt style)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                StreamPreset.entries.forEach { preset ->
+                    val isSelected = config.preset == preset
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isSelected) CyanAccent else SlateBorder.copy(alpha = 0.5f))
+                            .clickable(enabled = !metrics.isStreaming) { onPresetChanged(preset) }
+                            .padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = preset.shortName,
+                            color = if (isSelected) DeepSpace else TextPrimary,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.weight(1f))
@@ -179,7 +210,7 @@ fun OmtStreamHud(
                 TelemetryItem(label = "FPS", value = "${metrics.liveFps}")
                 TelemetryItem(label = "BITRATE", value = "${metrics.liveBitrateKbps}k")
                 TelemetryItem(label = "LATENCY", value = "${metrics.estimatedLatencyMs}ms", color = EmeraldSuccess)
-                TelemetryItem(label = "PACKETS", value = "${metrics.totalPacketsSent}")
+                TelemetryItem(label = "FRAMES", value = "${metrics.totalPacketsSent}")
             }
         }
 

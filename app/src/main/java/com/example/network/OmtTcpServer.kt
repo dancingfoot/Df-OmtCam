@@ -1,6 +1,7 @@
 package com.example.network
 
 import android.util.Log
+import com.example.BuildConfig
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.EOFException
@@ -335,7 +336,7 @@ class OmtTcpServer {
             xml.contains("<OMTSubscribe Metadata=\"true\"") -> {
                 session.subscribedMetadata = true
                 Log.i(TAG, "Receiver subscribed to METADATA: ${session.socket.remoteSocketAddress}")
-                val infoXml = "<OMTInfo ProductName=\"DF-OmtCamera\" Manufacturer=\"OmtCam\" Version=\"1.0\" />"
+                val infoXml = "<OMTInfo ProductName=\"DF-OmtCamera\" Manufacturer=\"OmtCam\" Version=\"${BuildConfig.VERSION_NAME}\" />"
                 session.enqueue(OutboundPacket(OutboundKind.METADATA, buildMetadataFrame(infoXml)))
                 session.enqueue(OutboundPacket(OutboundKind.METADATA, buildMetadataFrame(currentCombinedTallyXml())))
             }

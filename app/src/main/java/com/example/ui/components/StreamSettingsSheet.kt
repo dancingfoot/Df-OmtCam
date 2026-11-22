@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.model.StreamConfig
 import com.example.model.StreamPreset
 import com.example.model.VmxQuality
@@ -94,7 +95,7 @@ fun StreamSettingsSheet(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Open Media Transport (_omt._tcp)",
+                        text = "Open Media Transport (_omt._tcp) • v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )

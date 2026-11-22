@@ -88,7 +88,6 @@ fun OmtCamApp(
                 onToggleTorch = { viewModel.toggleTorch() },
                 onSwitchCamera = { viewModel.switchCamera() },
                 onOpenSettings = { viewModel.setSettingsVisible(true) },
-                onRequestKeyFrame = { viewModel.requestKeyFrame() },
                 onPresetChanged = { viewModel.updatePreset(it) },
                 modifier = Modifier
                     .fillMaxSize()
@@ -104,8 +103,8 @@ fun OmtCamApp(
                     onDismiss = { viewModel.setSettingsVisible(false) },
                     onPortChanged = { viewModel.updatePort(it) },
                     onStreamIdChanged = { viewModel.updateStreamId(it) },
-                    onManualIpChanged = { viewModel.updateManualTargetIp(it) },
-                    onPresetChanged = { viewModel.updatePreset(it) }
+                    onPresetChanged = { viewModel.updatePreset(it) },
+                    onQualityChanged = { viewModel.updateQuality(it) }
                 )
             }
         } else {

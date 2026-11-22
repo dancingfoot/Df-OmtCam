@@ -19,7 +19,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -44,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.StreamConfig
 import com.example.model.StreamPreset
+import com.example.model.VmxQuality
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.DeepSpace
 import com.example.ui.theme.EmeraldSuccess
@@ -63,8 +63,8 @@ fun StreamSettingsSheet(
     onDismiss: () -> Unit,
     onPortChanged: (String) -> Unit,
     onStreamIdChanged: (String) -> Unit,
-    onManualIpChanged: (String) -> Unit,
-    onPresetChanged: (StreamPreset) -> Unit
+    onPresetChanged: (StreamPreset) -> Unit,
+    onQualityChanged: (VmxQuality) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -81,7 +81,6 @@ fun StreamSettingsSheet(
                 .padding(bottom = 32.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -95,7 +94,7 @@ fun StreamSettingsSheet(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Compatible with OBS OMT Source & vMix",
+                        text = "Open Media Transport (_omt._tcp)",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -111,7 +110,6 @@ fun StreamSettingsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // OBS / VMIX CONNECTION INSTRUCTIONS CARD
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -128,7 +126,7 @@ fun StreamSettingsSheet(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "How to connect in OBS / vMix",
+                            text = "How to connect in OBS / vMix / OMT Viewer",
                             color = EmeraldSuccess,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
@@ -136,7 +134,7 @@ fun StreamSettingsSheet(
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "1. In OBS, add an 'OMT Source' (requires OBS 31+ with OMT Plugin).\n2. Look for '${config.streamId}' in the source drop-down list.\n3. If your Wi-Fi blocks Bonjour discovery, enter this phone's IP directly in OBS:",
+                        text = "1. Tap GO LIVE to advertise via mDNS (_omt._tcp).\n2. In OBS (OMT Source), vMix, or OMT Viewer, select '${config.streamId.ifEmpty { "Camera" }}' from Discovered Sources.",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp
@@ -160,9 +158,8 @@ fun StreamSettingsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 1. STREAM / CAMERA NAME
             Text(
-                text = "CAMERA NAME (mDNS BROADCAST)",
+                text = "SOURCE NAME (mDNS: DEVICE (NAME))",
                 color = TextMuted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -176,8 +173,8 @@ fun StreamSettingsSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("stream_id_input"),
-                label = { Text("Camera Name") },
-                placeholder = { Text("e.g. Cam-1, DF-OmtCamera") },
+                label = { Text("Source Name") },
+                placeholder = { Text("e.g. Camera, Cam-1") },
                 singleLine = true,
                 enabled = !isStreaming,
                 colors = OutlinedTextFieldDefaults.colors(
@@ -190,14 +187,13 @@ fun StreamSettingsSheet(
                 )
             )
 
-            // Preset Quick-Name Suggestions
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp),
+                    .padding(top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                listOf("Cam-1", "Cam-2", "Mobile-OMT", "DF-OmtCamera").forEach { suggestion ->
+                listOf("Camera", "Cam-1", "Cam-2", "Mobile").forEach { suggestion ->
                     Surface(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -218,9 +214,8 @@ fun StreamSettingsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 2. OMT PORT
             Text(
-                text = "OMT PORT (OBS default: 6400)",
+                text = "OMT PORT (Default: 6400)",
                 color = TextMuted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -248,7 +243,6 @@ fun StreamSettingsSheet(
                 )
             )
 
-            // Quick Port selection buttons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -279,50 +273,49 @@ fun StreamSettingsSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 3. OPTIONAL MANUAL TARGET PC IP (Fallback for strict router multicast filtering)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "TARGET PC IP (OPTIONAL FALLBACK)",
-                    color = TextMuted,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
+            Text(
+                text = "VMX1 QUALITY PROFILE",
+                color = TextMuted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
             Spacer(modifier = Modifier.height(6.dp))
 
-            OutlinedTextField(
-                value = config.manualTargetIp,
-                onValueChange = onManualIpChanged,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("manual_target_ip_input"),
-                label = { Text("PC IP (Leave blank for auto-discovery)") },
-                placeholder = { Text("e.g. 192.168.1.50 (Optional)") },
-                supportingText = {
-                    Text(
-                        text = "Leave empty for standard mDNS auto-discovery. If your router blocks multicast, enter your PC's IP here.",
-                        color = TextMuted,
-                        fontSize = 11.sp
-                    )
-                },
-                singleLine = true,
-                enabled = !isStreaming,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = CyanAccent,
-                    unfocusedBorderColor = SlateBorder,
-                    focusedLabelColor = CyanAccent,
-                    unfocusedLabelColor = TextSecondary,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                )
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                VmxQuality.entries.forEach { q ->
+                    val selected = config.quality == q
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = !isStreaming) { onQualityChanged(q) },
+                        color = if (selected) CyanAccent.copy(alpha = 0.2f) else SlateSurface,
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (selected) CyanAccent else SlateBorder
+                        )
+                    ) {
+                        Text(
+                            text = q.name,
+                            color = if (selected) CyanAccent else TextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 4. RESOLUTION & FPS PRESET
             Text(
-                text = "RESOLUTION & QUALITY",
+                text = "RESOLUTION & FPS",
                 color = TextMuted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -352,7 +345,7 @@ fun StreamSettingsSheet(
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = "${preset.width}x${preset.height} • ${preset.fps} FPS • ${preset.bitrateKbps} kbps",
+                            text = "${preset.width}x${preset.height} • ${preset.fps} FPS • OMT UYVY",
                             color = TextSecondary,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace

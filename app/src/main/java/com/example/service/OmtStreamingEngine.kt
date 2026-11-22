@@ -3,12 +3,12 @@ package com.example.service
 import android.content.Context
 import android.media.Image
 import android.util.Log
-import com.example.encoder.LowLatencyAudioEncoder
-import com.example.encoder.LowLatencyVideoEncoder
+import com.example.media.OmtAudioCapturer
+import com.example.media.OmtVideoConverter
 import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
 import com.example.network.OmtDiscoveryPublisher
-import com.example.network.OmtPacketTransmitter
+import com.example.network.OmtTcpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,24 +21,29 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Live OMT streaming engine:
- * - Runs standard OMT TCP Server on port (for OBS OMT Source / vMix connection)
- * - Broadcasts UDP packets to local network & manual target IP (if configured)
- * - Publishes Bonjour/mDNS service `_omt._tcp` so OBS/vMix lists it automatically
+ * Live OMT 1.0 Streaming Engine:
+ * - Runs PROTOCOL.md-compliant OMT TCP Server on configured port (default 6400)
+ * - Registers compliant mDNS (`_omt._tcp`) service `DeviceModel (SourceName)`
+ * - Converts CameraX YUV_420_888 frames to UYVY when a receiver is subscribed to Video
+ * - Captures 48kHz mono 'FPA1' float planar audio when a receiver is subscribed to Audio
  */
-class OmtStreamingEngine(private val context: Context) {
+class OmtStreamingEngine(context: Context) {
     companion object {
         private const val TAG = "OmtStreamingEngine"
     }
 
     private val scope = CoroutineScope(Dispatchers.Default + Job())
-    private val transmitter = OmtPacketTransmitter()
+    private val tcpServer = OmtTcpServer()
     private val discoveryPublisher = OmtDiscoveryPublisher(context)
 
-    private var videoEncoder: LowLatencyVideoEncoder? = null
-    private var audioEncoder: LowLatencyAudioEncoder? = null
+    private var audioCapturer: OmtAudioCapturer? = null
+    private var activeConfig: StreamConfig = StreamConfig()
+    private var reusableUyvyBuffer: ByteArray? = null
+    private val isStreamingActive = kotlinx.coroutines.flow.MutableStateFlow(false)
 
-    private val _metrics = MutableStateFlow(StreamMetrics())
+    private val _metrics = MutableStateFlow(
+        StreamMetrics(deviceIp = discoveryPublisher.getLocalWifiIpAddress())
+    )
     val metrics: StateFlow<StreamMetrics> = _metrics.asStateFlow()
 
     private var telemetryJob: Job? = null
@@ -46,59 +51,46 @@ class OmtStreamingEngine(private val context: Context) {
     private var lastBytesCount = 0L
     private var lastTelemetryTime = System.currentTimeMillis()
 
-    init {
-        val ip = transmitter.getLocalWifiIpAddress()
-        _metrics.value = _metrics.value.copy(deviceIp = ip)
-    }
-
     fun startStreaming(config: StreamConfig) {
-        scope.launch {
-            try {
-                Log.i(TAG, "Starting OMT engine on port ${config.port} (manual target: '${config.manualTargetIp}')")
-                transmitter.start(config.port, config.manualTargetIp)
+        stopStreaming()
+        activeConfig = config
 
-                // Announce camera stream on local network via mDNS for auto-discovery in OBS/vMix
-                discoveryPublisher.registerService(
-                    serviceName = config.streamId.ifEmpty { "DF-OmtCamera" },
+        scope.launch(Dispatchers.IO) {
+            try {
+                tcpServer.start(config.port)
+                val advertisedName = discoveryPublisher.registerService(
+                    sourceName = config.streamId,
                     port = config.port
                 )
+                val ip = discoveryPublisher.getLocalWifiIpAddress()
 
-                // Initialize Video Encoder
-                val preset = config.preset
-                videoEncoder = LowLatencyVideoEncoder(
-                    width = preset.width,
-                    height = preset.height,
-                    fps = preset.fps,
-                    bitrateKbps = preset.bitrateKbps,
-                    onFrameEncoded = { frameData, ptsUs, isKeyFrame ->
-                        transmitter.sendVideoFrame(
-                            frameData = frameData,
-                            presentationTimeUs = ptsUs,
-                            isKeyFrame = isKeyFrame
-                        )
-                        frameCounter.incrementAndGet()
-                    }
-                ).apply { start() }
-
-                // Initialize Audio Encoder if enabled
                 if (config.audioEnabled) {
-                    audioEncoder = LowLatencyAudioEncoder { audioChunk, ptsUs ->
-                        transmitter.sendAudioData(audioChunk, ptsUs)
+                    audioCapturer = OmtAudioCapturer { fpa1Bytes, sampleRate, samplesPerChannel, tsNs ->
+                        if (tcpServer.hasAudioSubscribers()) {
+                            tcpServer.sendAudioFrame(
+                                fpa1Data = fpa1Bytes,
+                                sampleRate = sampleRate,
+                                samplesPerChannel = samplesPerChannel,
+                                channels = 1,
+                                timestampNs = tsNs
+                            )
+                        }
                     }.apply { start() }
                 }
 
-                val currentDeviceIp = transmitter.getLocalWifiIpAddress()
-
+                isStreamingActive.value = true
                 _metrics.value = _metrics.value.copy(
                     isStreaming = true,
-                    deviceIp = currentDeviceIp,
-                    activeReceivers = transmitter.activeReceiversCount,
+                    deviceIp = ip,
+                    advertisedName = advertisedName,
+                    activeReceivers = tcpServer.connectedReceiversCount,
                     lastError = null
                 )
 
                 startTelemetryLoop()
+                Log.i(TAG, "OMT 1.0 stream started as '$advertisedName' on $ip:${config.port}")
             } catch (e: Exception) {
-                Log.e(TAG, "Error starting stream", e)
+                Log.e(TAG, "Failed to start OMT engine: ${e.message}", e)
                 _metrics.value = _metrics.value.copy(
                     isStreaming = false,
                     lastError = "Start failed: ${e.message}"
@@ -109,50 +101,58 @@ class OmtStreamingEngine(private val context: Context) {
     }
 
     fun stopStreaming() {
+        isStreamingActive.value = false
         telemetryJob?.cancel()
         telemetryJob = null
 
         discoveryPublisher.unregisterService()
 
-        videoEncoder?.stop()
-        videoEncoder = null
+        audioCapturer?.stop()
+        audioCapturer = null
 
-        audioEncoder?.stop()
-        audioEncoder = null
-
-        transmitter.stop()
+        tcpServer.stop()
+        reusableUyvyBuffer = null
 
         _metrics.value = _metrics.value.copy(
             isStreaming = false,
             liveFps = 0.0,
             liveBitrateKbps = 0,
             activeReceivers = 0,
+            advertisedName = "",
             lastError = null
         )
     }
 
-    fun requestSyncFrame() {
-        videoEncoder?.requestKeyFrame()
-    }
-
     fun processCameraImage(image: Image, timestampNs: Long) {
-        videoEncoder?.encodeFrame(image, timestampNs)
+        if (!isStreamingActive.value || !tcpServer.hasVideoSubscribers()) return
+
+        val (uyvyBytes, dims) = OmtVideoConverter.convertYuv420ToUyvy(image, reusableUyvyBuffer)
+        reusableUyvyBuffer = uyvyBytes
+
+        tcpServer.sendVideoFrame(
+            uyvyData = uyvyBytes,
+            width = dims.first,
+            height = dims.second,
+            fps = activeConfig.preset.fps,
+            timestampNs = timestampNs
+        )
+        frameCounter.incrementAndGet()
     }
 
     private fun startTelemetryLoop() {
         telemetryJob?.cancel()
-        lastBytesCount = transmitter.totalBytesSent
+        lastBytesCount = tcpServer.totalBytesSent
         frameCounter.set(0)
         lastTelemetryTime = System.currentTimeMillis()
 
         telemetryJob = scope.launch {
-            while (isActive && transmitter.isConnected()) {
+            while (isActive && isStreamingActive.value) {
                 delay(1000)
                 val now = System.currentTimeMillis()
                 val deltaSec = (now - lastTelemetryTime) / 1000.0
 
                 if (deltaSec >= 0.5) {
-                    val currentBytes = transmitter.totalBytesSent
+                    val currentBytes = tcpServer.totalBytesSent
                     val currentFrames = frameCounter.getAndSet(0)
 
                     val fps = currentFrames / deltaSec
@@ -166,9 +166,9 @@ class OmtStreamingEngine(private val context: Context) {
                         liveFps = (fps * 10).toInt() / 10.0,
                         liveBitrateKbps = bitrateKbps,
                         totalBytesSent = currentBytes,
-                        totalPacketsSent = transmitter.totalPacketsSent,
-                        activeReceivers = transmitter.activeReceiversCount,
-                        estimatedLatencyMs = 20
+                        totalPacketsSent = tcpServer.totalPacketsSent,
+                        activeReceivers = tcpServer.connectedReceiversCount,
+                        estimatedLatencyMs = if (tcpServer.subscribedVideoCount > 0) 8 else 0
                     )
                 }
             }

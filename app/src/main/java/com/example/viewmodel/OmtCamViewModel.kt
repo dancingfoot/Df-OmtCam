@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
 import com.example.model.StreamPreset
+import com.example.model.VmxQuality
 import com.example.service.OmtStreamingEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,12 +49,12 @@ class OmtCamViewModel(application: Application) : AndroidViewModel(application) 
         _config.value = _config.value.copy(streamId = id.trim())
     }
 
-    fun updateManualTargetIp(ip: String) {
-        _config.value = _config.value.copy(manualTargetIp = ip.trim())
-    }
-
     fun updatePreset(preset: StreamPreset) {
         _config.value = _config.value.copy(preset = preset)
+    }
+
+    fun updateQuality(quality: VmxQuality) {
+        _config.value = _config.value.copy(quality = quality)
     }
 
     fun toggleAudio() {
@@ -70,10 +71,6 @@ class OmtCamViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setSettingsVisible(visible: Boolean) {
         _showSettingsSheet.value = visible
-    }
-
-    fun requestKeyFrame() {
-        engine.requestSyncFrame()
     }
 
     fun onCameraFrame(image: Image, timestampNs: Long) {

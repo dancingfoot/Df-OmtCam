@@ -73,7 +73,6 @@ fun OmtStreamHud(
     onToggleTorch: () -> Unit,
     onSwitchCamera: () -> Unit,
     onOpenSettings: () -> Unit,
-    onRequestKeyFrame: () -> Unit,
     onPresetChanged: (StreamPreset) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -134,7 +133,7 @@ fun OmtStreamHud(
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = config.streamId.ifEmpty { "DF-OmtCamera" },
+                            text = config.streamId.ifEmpty { "Camera" },
                             color = TextPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -231,7 +230,7 @@ fun OmtStreamHud(
                 TelemetryItem(label = "BITRATE", value = "${metrics.liveBitrateKbps}k")
                 TelemetryItem(
                     label = "RECEIVERS",
-                    value = if (metrics.activeReceivers > 0) "${metrics.activeReceivers}" else "Broadcasting",
+                    value = if (metrics.activeReceivers > 0) "${metrics.activeReceivers}" else "Waiting",
                     color = EmeraldSuccess
                 )
                 TelemetryItem(label = "LATENCY", value = "${metrics.estimatedLatencyMs}ms", color = EmeraldSuccess)

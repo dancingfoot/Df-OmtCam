@@ -30,7 +30,6 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
@@ -51,7 +50,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.model.OmtTransportMode
 import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
 import com.example.model.StreamPreset
@@ -77,7 +75,6 @@ fun OmtStreamHud(
     onOpenSettings: () -> Unit,
     onRequestKeyFrame: () -> Unit,
     onPresetChanged: (StreamPreset) -> Unit,
-    onSwitchToViewer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "live_pulse")
@@ -97,7 +94,7 @@ fun OmtStreamHud(
             .padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // TOP HUD BAR: Title, Live Status, 1-Tap Resolution Bar & Endpoint
+        // TOP HUD BAR: Title, Live Status, Camera Name & Port, 1-Tap Resolution Bar
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -127,25 +124,48 @@ fun OmtStreamHud(
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    // Clickable camera name badge
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenSettings),
+                        color = SlateBorder.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = config.streamId.ifEmpty { "DF-OmtCamera" },
+                            color = TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
 
-                // Target or Server Listening indicator
-                Text(
-                    text = if (config.transportMode == OmtTransportMode.OMT_TCP_SERVER) {
-                        "OMT Server :${config.targetPort}"
-                    } else {
-                        "${config.targetHost}:${config.targetPort}"
-                    },
-                    color = CyanAccent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    fontFamily = FontFamily.Monospace
-                )
+                // OMT Broadcast Port & Status
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onOpenSettings),
+                    color = CyanAccent.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = ":${config.port}",
+                        color = CyanAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // ULTRA-FAST 1-TAP RESOLUTION SELECTOR (opencam-omt style)
+            // ULTRA-FAST 1-TAP RESOLUTION SELECTOR
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -209,8 +229,12 @@ fun OmtStreamHud(
             ) {
                 TelemetryItem(label = "FPS", value = "${metrics.liveFps}")
                 TelemetryItem(label = "BITRATE", value = "${metrics.liveBitrateKbps}k")
+                TelemetryItem(
+                    label = "RECEIVERS",
+                    value = if (metrics.activeReceivers > 0) "${metrics.activeReceivers}" else "Broadcasting",
+                    color = EmeraldSuccess
+                )
                 TelemetryItem(label = "LATENCY", value = "${metrics.estimatedLatencyMs}ms", color = EmeraldSuccess)
-                TelemetryItem(label = "FRAMES", value = "${metrics.totalPacketsSent}")
             }
         }
 
@@ -225,7 +249,7 @@ fun OmtStreamHud(
                     )
                 )
                 .border(1.dp, SlateBorder, RoundedCornerShape(24.dp))
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = 18.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -233,7 +257,7 @@ fun OmtStreamHud(
             FilledTonalIconButton(
                 onClick = onToggleAudio,
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(48.dp)
                     .testTag("toggle_audio_button"),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = if (config.audioEnabled) CyanAccent.copy(alpha = 0.15f) else SlateBorder,
@@ -250,7 +274,7 @@ fun OmtStreamHud(
             FilledTonalIconButton(
                 onClick = onToggleTorch,
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(48.dp)
                     .testTag("toggle_torch_button"),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = if (config.torchEnabled) AmberWarning.copy(alpha = 0.15f) else SlateBorder,
@@ -267,8 +291,8 @@ fun OmtStreamHud(
             Button(
                 onClick = onToggleStream,
                 modifier = Modifier
-                    .height(52.dp)
-                    .padding(horizontal = 4.dp)
+                    .height(54.dp)
+                    .padding(horizontal = 8.dp)
                     .testTag("stream_toggle_button"),
                 shape = RoundedCornerShape(18.dp),
                 colors = ButtonDefaults.buttonColors(
@@ -294,7 +318,7 @@ fun OmtStreamHud(
             FilledTonalIconButton(
                 onClick = onSwitchCamera,
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(48.dp)
                     .testTag("switch_camera_button"),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = SlateBorder,
@@ -311,7 +335,7 @@ fun OmtStreamHud(
             FilledTonalIconButton(
                 onClick = onOpenSettings,
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(48.dp)
                     .testTag("open_settings_button"),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = SlateBorder,
@@ -321,23 +345,6 @@ fun OmtStreamHud(
                 Icon(
                     imageVector = Icons.Default.Settings,
                     contentDescription = "Stream Configuration"
-                )
-            }
-
-            // Switch to Viewer Mode
-            FilledTonalIconButton(
-                onClick = onSwitchToViewer,
-                modifier = Modifier
-                    .size(46.dp)
-                    .testTag("switch_viewer_mode_button"),
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = CyanAccent.copy(alpha = 0.15f),
-                    contentColor = CyanAccent
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Tv,
-                    contentDescription = "Switch to OMT Viewer Mode"
                 )
             }
         }

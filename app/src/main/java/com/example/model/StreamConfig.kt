@@ -1,13 +1,5 @@
 package com.example.model
 
-enum class OmtTransportMode(val displayName: String, val description: String) {
-    OMT_TCP_SERVER("OMT Standard TCP Server", "Listens for OMT PC receivers (vMix/OBS) on port 6400+ with mDNS"),
-    OMT_TCP("OMT Unicast TCP Client", "Length-prefixed OMTMediaFrame over persistent low-latency TCP"),
-    OMT_UDP("OMT Direct UDP", "Framed NAL/TS elementary stream with OMT packet header"),
-    RTP_H264("RTP / H.264 (RFC 6184)", "Standard ultra-low latency RTP packetization for OBS/vMix"),
-    RAW_SOCKET("Raw Video Socket", "Direct low-overhead TCP/UDP socket streaming")
-}
-
 /**
  * Clean resolution & quality presets matching opencamera-omt (720p, 1080p, 4K).
  */
@@ -25,11 +17,17 @@ enum class StreamPreset(
     RES_4K("4K Ultra HD (3840x2160 @ 30fps)", "4K", 3840, 2160, 30, 15000)
 }
 
+/**
+ * Flexible OMT Streaming Configuration:
+ * - port: Listening port (default 6400, standard OMT sender range 6400-6600)
+ * - streamId: Bonjour/mDNS service instance name shown in OBS/vMix dropdown
+ * - manualTargetIp: Optional unicast IP. When empty, runs 100% zero-config (mDNS + TCP Server + Subnet Broadcast).
+ *                   If user's router blocks mDNS/multicast, entering a target PC IP guarantees packet delivery!
+ */
 data class StreamConfig(
-    val targetHost: String = "192.168.1.100",
-    val targetPort: Int = 6400,
+    val port: Int = 6400,
     val streamId: String = "DF-OmtCamera",
-    val transportMode: OmtTransportMode = OmtTransportMode.OMT_TCP_SERVER,
+    val manualTargetIp: String = "",
     val preset: StreamPreset = StreamPreset.RES_720P,
     val audioEnabled: Boolean = true,
     val torchEnabled: Boolean = false,
@@ -43,7 +41,7 @@ data class StreamMetrics(
     val totalBytesSent: Long = 0,
     val totalPacketsSent: Long = 0,
     val estimatedLatencyMs: Long = 0,
-    val connectedEndpoint: String = "",
-    val activeClients: Int = 0,
+    val activeReceivers: Int = 0,
+    val deviceIp: String = "",
     val lastError: String? = null
 )

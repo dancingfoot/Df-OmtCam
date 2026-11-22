@@ -5,7 +5,6 @@ import android.media.Image
 import android.util.Log
 import com.example.encoder.LowLatencyAudioEncoder
 import com.example.encoder.LowLatencyVideoEncoder
-import com.example.model.OmtTransportMode
 import com.example.model.StreamConfig
 import com.example.model.StreamMetrics
 import com.example.network.OmtDiscoveryPublisher
@@ -22,11 +21,10 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Manages the live OMT streaming pipeline:
- * - Coordinates Video & Audio encoders
- * - Directs frames to the OmtPacketTransmitter (TCP Server, TCP Client, UDP, RTP)
- * - Publishes stream via mDNS for automatic desktop receiver discovery
- * - Emits real-time network telemetry (FPS, Bitrate, Bytes, Latency)
+ * Live OMT streaming engine:
+ * - Runs standard OMT TCP Server on port (for OBS OMT Source / vMix connection)
+ * - Broadcasts UDP packets to local network & manual target IP (if configured)
+ * - Publishes Bonjour/mDNS service `_omt._tcp` so OBS/vMix lists it automatically
  */
 class OmtStreamingEngine(private val context: Context) {
     companion object {
@@ -48,16 +46,21 @@ class OmtStreamingEngine(private val context: Context) {
     private var lastBytesCount = 0L
     private var lastTelemetryTime = System.currentTimeMillis()
 
+    init {
+        val ip = transmitter.getLocalWifiIpAddress()
+        _metrics.value = _metrics.value.copy(deviceIp = ip)
+    }
+
     fun startStreaming(config: StreamConfig) {
         scope.launch {
             try {
-                Log.i(TAG, "Starting stream via ${config.transportMode} on port ${config.targetPort}")
-                transmitter.connect(config.targetHost, config.targetPort, config.transportMode)
+                Log.i(TAG, "Starting OMT engine on port ${config.port} (manual target: '${config.manualTargetIp}')")
+                transmitter.start(config.port, config.manualTargetIp)
 
-                // Publish on local network via mDNS (Bonjour) for auto-discovery
+                // Announce camera stream on local network via mDNS for auto-discovery in OBS/vMix
                 discoveryPublisher.registerService(
                     serviceName = config.streamId.ifEmpty { "DF-OmtCamera" },
-                    port = config.targetPort
+                    port = config.port
                 )
 
                 // Initialize Video Encoder
@@ -68,7 +71,11 @@ class OmtStreamingEngine(private val context: Context) {
                     fps = preset.fps,
                     bitrateKbps = preset.bitrateKbps,
                     onFrameEncoded = { frameData, ptsUs, isKeyFrame ->
-                        transmitter.sendVideoFrame(frameData, ptsUs, isKeyFrame)
+                        transmitter.sendVideoFrame(
+                            frameData = frameData,
+                            presentationTimeUs = ptsUs,
+                            isKeyFrame = isKeyFrame
+                        )
                         frameCounter.incrementAndGet()
                     }
                 ).apply { start() }
@@ -80,14 +87,12 @@ class OmtStreamingEngine(private val context: Context) {
                     }.apply { start() }
                 }
 
-                val endpointLabel = when (config.transportMode) {
-                    OmtTransportMode.OMT_TCP_SERVER -> "TCP Server :${config.targetPort} (mDNS Active)"
-                    else -> "${config.targetHost}:${config.targetPort}"
-                }
+                val currentDeviceIp = transmitter.getLocalWifiIpAddress()
 
                 _metrics.value = _metrics.value.copy(
                     isStreaming = true,
-                    connectedEndpoint = endpointLabel,
+                    deviceIp = currentDeviceIp,
+                    activeReceivers = transmitter.activeReceiversCount,
                     lastError = null
                 )
 
@@ -96,7 +101,7 @@ class OmtStreamingEngine(private val context: Context) {
                 Log.e(TAG, "Error starting stream", e)
                 _metrics.value = _metrics.value.copy(
                     isStreaming = false,
-                    lastError = "Connection failed: ${e.message}"
+                    lastError = "Start failed: ${e.message}"
                 )
                 stopStreaming()
             }
@@ -115,58 +120,56 @@ class OmtStreamingEngine(private val context: Context) {
         audioEncoder?.stop()
         audioEncoder = null
 
-        transmitter.disconnect()
+        transmitter.stop()
 
         _metrics.value = _metrics.value.copy(
             isStreaming = false,
             liveFps = 0.0,
-            liveBitrateKbps = 0
+            liveBitrateKbps = 0,
+            activeReceivers = 0,
+            lastError = null
         )
-        Log.i(TAG, "Streaming stopped")
-    }
-
-    /**
-     * Pass camera image from CameraX to the active encoder.
-     */
-    fun processCameraImage(image: Image, timestampNs: Long) {
-        videoEncoder?.encodeFrame(image, timestampNs)
     }
 
     fun requestSyncFrame() {
         videoEncoder?.requestKeyFrame()
     }
 
+    fun processCameraImage(image: Image, timestampNs: Long) {
+        videoEncoder?.encodeFrame(image, timestampNs)
+    }
+
     private fun startTelemetryLoop() {
         telemetryJob?.cancel()
-        frameCounter.set(0)
         lastBytesCount = transmitter.totalBytesSent
+        frameCounter.set(0)
         lastTelemetryTime = System.currentTimeMillis()
 
         telemetryJob = scope.launch {
-            while (isActive) {
+            while (isActive && transmitter.isConnected()) {
                 delay(1000)
                 val now = System.currentTimeMillis()
-                val elapsedSec = (now - lastTelemetryTime).toDouble() / 1000.0
-                if (elapsedSec > 0) {
-                    val currentFrames = frameCounter.getAndSet(0)
-                    val fps = currentFrames / elapsedSec
+                val deltaSec = (now - lastTelemetryTime) / 1000.0
 
+                if (deltaSec >= 0.5) {
                     val currentBytes = transmitter.totalBytesSent
-                    val bytesDiff = currentBytes - lastBytesCount
-                    lastBytesCount = currentBytes
-                    val bitrateKbps = ((bytesDiff * 8) / (elapsedSec * 1000)).toLong()
+                    val currentFrames = frameCounter.getAndSet(0)
 
-                    // Latency estimation
-                    val estimatedLatency = 10L + (bitrateKbps / 1000L).coerceAtMost(15L)
+                    val fps = currentFrames / deltaSec
+                    val bitrateKbps = (((currentBytes - lastBytesCount) * 8) / deltaSec / 1000).toLong()
+
+                    lastBytesCount = currentBytes
+                    lastTelemetryTime = now
 
                     _metrics.value = _metrics.value.copy(
+                        isStreaming = true,
                         liveFps = (fps * 10).toInt() / 10.0,
                         liveBitrateKbps = bitrateKbps,
                         totalBytesSent = currentBytes,
                         totalPacketsSent = transmitter.totalPacketsSent,
-                        estimatedLatencyMs = estimatedLatency
+                        activeReceivers = transmitter.activeReceiversCount,
+                        estimatedLatencyMs = 20
                     )
-                    lastTelemetryTime = now
                 }
             }
         }

@@ -1,5 +1,7 @@
 package com.example.ui.components
 
+import android.util.Log
+import android.util.Size
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -43,7 +45,13 @@ fun CameraStreamPreview(
     }
 
     LaunchedEffect(config.torchEnabled, activeCamera) {
-        activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
+        try {
+            if (activeCamera?.cameraInfo?.hasFlashUnit() == true) {
+                activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
+            }
+        } catch (e: Exception) {
+            Log.w("CameraStreamPreview", "Failed to set torch: ${e.message}")
+        }
     }
 
     // Re-bind when camera flips or resolution preset changes
@@ -61,18 +69,24 @@ fun CameraStreamPreview(
             it.setSurfaceProvider(pv.surfaceProvider)
         }
 
+        val targetResolution = Size(config.preset.width, config.preset.height)
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(config.preset.width, config.preset.height))
+            .setTargetResolution(targetResolution)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
 
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-            val image = imageProxy.image
-            if (image != null) {
-                viewModel.onCameraFrame(image, imageProxy.imageInfo.timestamp)
+            try {
+                val image = imageProxy.image
+                if (image != null) {
+                    viewModel.onCameraFrame(image, imageProxy.imageInfo.timestamp)
+                }
+            } catch (e: Exception) {
+                Log.e("CameraStreamPreview", "Analyzer error: ${e.message}")
+            } finally {
+                imageProxy.close()
             }
-            imageProxy.close()
         }
 
         try {
@@ -83,9 +97,11 @@ fun CameraStreamPreview(
                 preview,
                 imageAnalysis
             )
-            activeCamera?.cameraControl?.enableTorch(config.torchEnabled)
+            if (config.torchEnabled && activeCamera?.cameraInfo?.hasFlashUnit() == true) {
+                activeCamera?.cameraControl?.enableTorch(true)
+            }
         } catch (e: Exception) {
-            android.util.Log.e("CameraStreamPreview", "Failed to bind camera: ${e.message}", e)
+            Log.e("CameraStreamPreview", "Failed to bind camera: ${e.message}", e)
         }
     }
 
@@ -100,7 +116,11 @@ fun CameraStreamPreview(
 
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener({
-                cameraProvider = cameraProviderFuture.get()
+                try {
+                    cameraProvider = cameraProviderFuture.get()
+                } catch (e: Exception) {
+                    Log.e("CameraStreamPreview", "Failed to get camera provider", e)
+                }
             }, ContextCompat.getMainExecutor(ctx))
 
             previewView

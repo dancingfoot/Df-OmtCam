@@ -3,6 +3,7 @@ package com.example.encoder
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Bundle
 import android.util.Log
@@ -10,17 +11,16 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Ultra low latency H.264 (AVC) Hardware Video Encoder using Android MediaCodec.
- * Optimized for real-time live streaming like opencamera-omt:
- * - Baseline Profile (no B-frames)
- * - Zero-latency mode enabled (KEY_LATENCY = 0, Realtime priority)
+ * Ultra-low-latency Hardware H.264 video encoder.
+ * - Hardware AVC (H.264) via MediaCodec
+ * - Resolves supported color formats dynamically (YUV420Flexible / SemiPlanar / Planar)
+ * - Safe graceful drain shutdown preventing "Pending dequeue output buffer request cancelled"
+ * - Baseline Profile with fallback for device compatibility
  * - 1-second keyframe interval for fast client joins
- * - Fast zero-allocation buffer pooling for YUV data
- * - CBR (Constant Bitrate) with dynamic bitrate adjustment
  */
 class LowLatencyVideoEncoder(
-    private val width: Int,
-    private val height: Int,
+    val width: Int,
+    val height: Int,
     private val fps: Int,
     private val bitrateKbps: Int,
     private val onFrameEncoded: (ByteArray, Long, Boolean) -> Unit
@@ -37,37 +37,48 @@ class LowLatencyVideoEncoder(
     // Cache SPS/PPS parameter sets to prepend to IDR keyframes for instant receiver decoding
     private var spsPpsHeader: ByteArray? = null
 
-    // Reusable byte array buffer to avoid GC pressure during 30/60fps camera analysis
+    // Preallocated buffer matching the encoder format (width * height * 3 / 2)
+    private val expectedFrameSize = (width * height * 3) / 2
     private var yuvBuffer: ByteArray? = null
 
     fun start() {
         if (isRunning.get()) return
         try {
+            val chosenColorFormat = selectColorFormat()
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, chosenColorFormat)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between keyframes for fast join
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
-                // Low latency hints on Android
+                // Set CBR mode if supported, fallback to VBR silently if rejected
+                try {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                } catch (_: Exception) {}
+
+                // Try Baseline profile for lowest latency
+                try {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                } catch (_: Exception) {}
+
+                // Low latency and realtime hints on Android (ignored if not supported by hardware vendor)
                 try {
                     setInteger(MediaFormat.KEY_LATENCY, 0)
-                    setInteger(MediaFormat.KEY_PRIORITY, 0) // Realtime priority
+                } catch (_: Exception) {}
+                try {
+                    setInteger(MediaFormat.KEY_PRIORITY, 0)
                 } catch (_: Exception) {}
             }
 
-            mediaCodec = MediaCodec.createEncoderByType(MIME_TYPE).apply {
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                start()
-            }
+            val encoder = MediaCodec.createEncoderByType(MIME_TYPE)
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoder.start()
+            mediaCodec = encoder
 
-            yuvBuffer = ByteArray((width * height * 3) / 2)
+            yuvBuffer = ByteArray(expectedFrameSize)
             isRunning.set(true)
             startDrainLoop()
-            Log.i(TAG, "Hardware H.264 encoder initialized: ${width}x${height} @ $fps fps, $bitrateKbps kbps")
+            Log.i(TAG, "H.264 encoder initialized: ${width}x${height} @ $fps fps, colorFormat=$chosenColorFormat")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize video encoder", e)
             stop()
@@ -75,7 +86,34 @@ class LowLatencyVideoEncoder(
     }
 
     /**
+     * Determines the optimal supported color format for H.264 encoders on this device.
+     */
+    private fun selectColorFormat(): Int {
+        try {
+            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+            for (info in codecList.codecInfos) {
+                if (!info.isEncoder) continue
+                val types = info.supportedTypes
+                if (types.any { it.equals(MIME_TYPE, ignoreCase = true) }) {
+                    val caps = info.getCapabilitiesForType(MIME_TYPE)
+                    val formats = caps.colorFormats
+                    // Prefer YUV420Flexible
+                    if (formats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)) {
+                        return MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                    }
+                    if (formats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)) {
+                        return MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+    }
+
+    /**
      * Enqueue a YUV_420_888 camera frame image from CameraX ImageAnalysis.
+     * Safely reads and converts the Image into the encoder's expected dimensions (width x height)
+     * preventing any out-of-bounds exceptions when input and encoder buffer sizes differ.
      */
     fun encodeFrame(image: Image, timestampNs: Long) {
         if (!isRunning.get()) return
@@ -87,16 +125,21 @@ class LowLatencyVideoEncoder(
                 val inputBuffer = codec.getInputBuffer(inputIndex)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    val targetArray = yuvBuffer ?: ByteArray((width * height * 3) / 2).also { yuvBuffer = it }
-                    val filledSize = fastYuv420ToNv21(image, targetArray)
-                    val len = filledSize.coerceAtMost(inputBuffer.remaining())
-                    inputBuffer.put(targetArray, 0, len)
+                    val targetArray = yuvBuffer ?: ByteArray(expectedFrameSize).also { yuvBuffer = it }
+
+                    // Convert image safely to target NV21/Semi-planar buffer
+                    val writtenBytes = copyImageToTargetNv21(image, targetArray, width, height)
+                    val safeLen = writtenBytes.coerceAtMost(inputBuffer.remaining())
+                    inputBuffer.put(targetArray, 0, safeLen)
+
                     val ptsUs = timestampNs / 1000
-                    codec.queueInputBuffer(inputIndex, 0, len, ptsUs, 0)
+                    codec.queueInputBuffer(inputIndex, 0, safeLen, ptsUs, 0)
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "encodeFrame error: ${e.message}")
+            if (isRunning.get()) {
+                Log.e(TAG, "encodeFrame error: ${e.message}")
+            }
         }
     }
 
@@ -118,124 +161,176 @@ class LowLatencyVideoEncoder(
             while (isRunning.get()) {
                 val codec = mediaCodec ?: break
                 val outputIndex = try {
-                    codec.dequeueOutputBuffer(bufferInfo, 2000)
+                    codec.dequeueOutputBuffer(bufferInfo, 5000)
+                } catch (e: IllegalStateException) {
+                    // Codec was stopped or released
+                    break
                 } catch (e: Exception) {
                     break
                 }
 
                 if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val newFormat = codec.outputFormat
-                    val csd0 = newFormat.getByteBuffer("csd-0") // SPS
-                    val csd1 = newFormat.getByteBuffer("csd-1") // PPS
-                    if (csd0 != null && csd1 != null) {
-                        val header = ByteArray(csd0.remaining() + csd1.remaining())
-                        csd0.get(header, 0, csd0.remaining())
-                        csd1.get(header, csd0.remaining(), csd1.remaining())
-                        spsPpsHeader = header
-                        Log.i(TAG, "Saved SPS/PPS header size: ${header.size}")
-                    }
+                    try {
+                        val newFormat = codec.outputFormat
+                        val csd0 = newFormat.getByteBuffer("csd-0") // SPS
+                        val csd1 = newFormat.getByteBuffer("csd-1") // PPS
+                        if (csd0 != null && csd1 != null) {
+                            val header = ByteArray(csd0.remaining() + csd1.remaining())
+                            csd0.get(header, 0, csd0.remaining())
+                            csd1.get(header, csd0.remaining(), csd1.remaining())
+                            spsPpsHeader = header
+                            Log.i(TAG, "Saved SPS/PPS header size: ${header.size}")
+                        }
+                    } catch (_: Exception) {}
                 } else if (outputIndex >= 0) {
-                    val outBuf = codec.getOutputBuffer(outputIndex)
-                    if (outBuf != null && bufferInfo.size > 0) {
-                        outBuf.position(bufferInfo.offset)
-                        outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                    try {
+                        val outBuf = codec.getOutputBuffer(outputIndex)
+                        if (outBuf != null && bufferInfo.size > 0) {
+                            outBuf.position(bufferInfo.offset)
+                            outBuf.limit(bufferInfo.offset + bufferInfo.size)
 
-                        val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                        val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                            val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                            val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
 
-                        if (isConfig) {
-                            val cfg = ByteArray(bufferInfo.size)
-                            outBuf.get(cfg)
-                            spsPpsHeader = cfg
-                        } else {
-                            var payload = ByteArray(bufferInfo.size)
-                            outBuf.get(payload)
+                            if (isConfig) {
+                                val cfg = ByteArray(bufferInfo.size)
+                                outBuf.get(cfg)
+                                spsPpsHeader = cfg
+                            } else {
+                                var payload = ByteArray(bufferInfo.size)
+                                outBuf.get(payload)
 
-                            // Prepend SPS/PPS to IDR keyframe if not already included
-                            if (isKey && spsPpsHeader != null) {
-                                val combined = ByteArray(spsPpsHeader!!.size + payload.size)
-                                System.arraycopy(spsPpsHeader!!, 0, combined, 0, spsPpsHeader!!.size)
-                                System.arraycopy(payload, 0, combined, spsPpsHeader!!.size, payload.size)
-                                payload = combined
+                                // Prepend SPS/PPS to IDR keyframe if not already included
+                                if (isKey && spsPpsHeader != null) {
+                                    val combined = ByteArray(spsPpsHeader!!.size + payload.size)
+                                    System.arraycopy(spsPpsHeader!!, 0, combined, 0, spsPpsHeader!!.size)
+                                    System.arraycopy(payload, 0, combined, spsPpsHeader!!.size, payload.size)
+                                    payload = combined
+                                }
+
+                                onFrameEncoded(payload, bufferInfo.presentationTimeUs, isKey)
                             }
-
-                            onFrameEncoded(payload, bufferInfo.presentationTimeUs, isKey)
+                        }
+                        codec.releaseOutputBuffer(outputIndex, false)
+                    } catch (e: Exception) {
+                        if (isRunning.get()) {
+                            Log.w(TAG, "Error handling output buffer: ${e.message}")
                         }
                     }
-                    codec.releaseOutputBuffer(outputIndex, false)
                 }
             }
         }, "OmtVideoEncoderDrain").apply { start() }
     }
 
     /**
-     * High-speed YUV420 to NV21/NV12 direct buffer copy into preallocated array.
+     * Converts a CameraX Image (YUV_420_888) to NV21 inside `outArray`.
+     * Handles differences between CameraX image size (imgW x imgH) and encoder format (targetW x targetH).
      */
-    private fun fastYuv420ToNv21(image: Image, out: ByteArray): Int {
-        val imgWidth = image.width
-        val imgHeight = image.height
+    private fun copyImageToTargetNv21(
+        image: Image,
+        out: ByteArray,
+        targetW: Int,
+        targetH: Int
+    ): Int {
+        val imgW = image.width
+        val imgH = image.height
+
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val yBuffer = yPlane.buffer
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
 
-        var outOffset = 0
         val yRowStride = yPlane.rowStride
         val yPixelStride = yPlane.pixelStride
 
-        if (yPixelStride == 1 && yRowStride == imgWidth) {
-            val ySize = imgWidth * imgHeight
-            yBuffer.position(0)
-            yBuffer.get(out, 0, ySize)
-            outOffset += ySize
-        } else {
-            for (row in 0 until imgHeight) {
-                yBuffer.position(row * yRowStride)
-                if (yPixelStride == 1) {
-                    yBuffer.get(out, outOffset, imgWidth)
-                    outOffset += imgWidth
-                } else {
-                    for (col in 0 until imgWidth) {
-                        out[outOffset++] = yBuffer.get(row * yRowStride + col * yPixelStride)
+        val uRowStride = uPlane.rowStride
+        val vRowStride = vPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vPixelStride = vPlane.pixelStride
+
+        val copyW = targetW.coerceAtMost(imgW)
+        val copyH = targetH.coerceAtMost(imgH)
+
+        // 1. Copy Y plane
+        val yCap = yBuf.capacity()
+        for (row in 0 until copyH) {
+            val ySrcRowStart = row * yRowStride
+            val yDstRowStart = row * targetW
+
+            if (yPixelStride == 1) {
+                val available = (yCap - ySrcRowStart).coerceAtLeast(0)
+                val len = copyW.coerceAtMost(available)
+                if (len > 0 && yDstRowStart + len <= out.size) {
+                    yBuf.position(ySrcRowStart)
+                    yBuf.get(out, yDstRowStart, len)
+                }
+            } else {
+                for (col in 0 until copyW) {
+                    val srcIndex = ySrcRowStart + (col * yPixelStride)
+                    val dstIndex = yDstRowStart + col
+                    if (srcIndex < yCap && dstIndex < out.size) {
+                        out[dstIndex] = yBuf.get(srcIndex)
                     }
                 }
             }
         }
 
-        // Copy UV
-        val uRowStride = uPlane.rowStride
-        val vRowStride = vPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vPixelStride = vPlane.pixelStride
-        val uvHeight = imgHeight / 2
-        val uvWidth = imgWidth / 2
+        // 2. Copy UV interleaved (NV21: V, U, V, U...)
+        val uvTargetStart = targetW * targetH
+        val uvCopyH = copyH / 2
+        val uvCopyW = copyW / 2
+        val uCap = uBuf.capacity()
+        val vCap = vBuf.capacity()
 
-        for (row in 0 until uvHeight) {
-            val uPos = row * uRowStride
-            val vPos = row * vRowStride
-            for (col in 0 until uvWidth) {
-                out[outOffset++] = uBuffer.get(uPos + col * uPixelStride)
-                out[outOffset++] = vBuffer.get(vPos + col * vPixelStride)
+        for (row in 0 until uvCopyH) {
+            val uSrcRowStart = row * uRowStride
+            val vSrcRowStart = row * vRowStride
+            val rowOutStart = uvTargetStart + (row * targetW)
+
+            for (col in 0 until uvCopyW) {
+                val uIdx = uSrcRowStart + (col * uPixelStride)
+                val vIdx = vSrcRowStart + (col * vPixelStride)
+
+                if (vIdx < vCap && uIdx < uCap) {
+                    val vByte = vBuf.get(vIdx)
+                    val uByte = uBuf.get(uIdx)
+
+                    val destIndex = rowOutStart + (col * 2)
+                    if (destIndex + 1 < out.size) {
+                        out[destIndex] = vByte
+                        out[destIndex + 1] = uByte
+                    }
+                }
             }
         }
 
-        return outOffset
+        return expectedFrameSize
     }
 
+    /**
+     * Cleanly and safely shuts down the encoder without cancelling pending dequeue requests mid-operation.
+     */
     fun stop() {
-        isRunning.set(false)
+        if (!isRunning.getAndSet(false)) return
+
+        // Join drain thread first so it exits its dequeueOutputBuffer loop cleanly
+        try {
+            drainThread?.join(300)
+        } catch (_: Exception) {}
+        drainThread = null
+
         try {
             mediaCodec?.stop()
+        } catch (_: Exception) {}
+        try {
             mediaCodec?.release()
         } catch (_: Exception) {}
         mediaCodec = null
 
-        drainThread?.interrupt()
-        drainThread = null
         yuvBuffer = null
-        Log.i(TAG, "Video encoder stopped")
+        Log.i(TAG, "Video encoder stopped cleanly")
     }
 }
